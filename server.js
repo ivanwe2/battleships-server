@@ -7,6 +7,7 @@ const wss = new WebSocket.Server({ server });
 
 let players = [];
 let sockets = [];
+let games = {};
 
 wss.on('connection', (ws) => {
   ws.on('message', (message) => {
@@ -22,15 +23,25 @@ wss.on('connection', (ws) => {
     } else if (data.type === 'INVITE') {
       const toSocket = sockets[data.to];
       if (toSocket) {
-        console.log('INVITE', data.to, toSocket);
         toSocket.send(JSON.stringify({ type: 'INVITE', from: data.from }));
       }
     } else if (data.type === 'ACCEPT_INVITE') {
       const fromSocket = sockets[data.from];
       const toSocket = sockets[data.to];
       if (fromSocket && toSocket) {
-        fromSocket.send(JSON.stringify({ type: 'START_GAME', opponent: data.to }));
-        toSocket.send(JSON.stringify({ type: 'START_GAME', opponent: data.from }));
+        const gameId = `${data.from}-${data.to}`;
+        games[gameId] = { players: [data.from, data.to], board: {} };
+        fromSocket.send(JSON.stringify({ type: 'START_GAME', opponent: data.to, gameId }));
+        toSocket.send(JSON.stringify({ type: 'START_GAME', opponent: data.from, gameId }));
+      }
+    } else if (data.type === 'ATTACK') {
+      const game = games[data.gameId];
+      if (game) {
+        const opponent = game.players.find(player => player !== data.player);
+        const opponentSocket = sockets[opponent];
+        if (opponentSocket) {
+          opponentSocket.send(JSON.stringify({ type: 'ATTACK', position: data.position }));
+        }
       }
     }
   });
