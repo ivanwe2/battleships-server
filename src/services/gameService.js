@@ -56,9 +56,6 @@ function acceptInvite(from, to) {
   // Use a more consistent game ID format
   const gameId = `${from}-${to}-${Date.now()}`;
   
-  // Store both the full ID and a simplified version for easier matching
-  const gameShortId = `${from}-${to}`;
-  
   gameStates[gameId] = {
     players: [from, to],
     readyPlayers: [],
@@ -72,8 +69,7 @@ function acceptInvite(from, to) {
     },
     turn: null,
     active: true,
-    created: Date.now(),
-    shortId: gameShortId // Store the short ID for lookup
+    created: Date.now()
   };
 
   [fromSocket, toSocket].forEach((socket, i) => {
@@ -87,50 +83,61 @@ function acceptInvite(from, to) {
   console.log(`Game ${gameId} started between ${from} and ${to}`);
 }
 
-function joinGame(ws, gameId, player) {
-  console.log(`Player ${player} trying to join game ${gameId}`);
-  
-  // First try direct match with the gameId
+function findGame(gameId) {
+  // Direct lookup first
   let game = gameStates[gameId];
   
-  // If not found, try to find a game by shortId or player names pattern
   if (!game) {
-    // Try to find by shortId
-    game = Object.values(gameStates).find(g => g.shortId === gameId);
-    
-    // If still not found, try to match by player names in the ID
-    if (!game) {
-      // Extract player names if gameId is in format "player1-player2"
-      const players = gameId.split('-');
-      if (players.length >= 2) {
-        game = Object.values(gameStates).find(g => 
-          g.players.includes(players[0]) && 
-          g.players.includes(players[1]) &&
-          g.active
-        );
+    // Find games that include a player in the gameId
+    const playerName = gameId.split('-')[0];
+    if (playerName) {
+      const playerGames = Object.entries(gameStates)
+        .filter(([id, g]) => id.includes(playerName) && g.active)
+        .sort((a, b) => b[1].created - a[1].created); // Sort by most recent
+      
+      if (playerGames.length > 0) {
+        return { gameId: playerGames[0][0], game: playerGames[0][1] };
       }
     }
     
-    // If we found a game through alternative methods, get its actual ID
-    if (game) {
-      gameId = Object.keys(gameStates).find(key => gameStates[key] === game);
-      console.log(`Found matching game with ID: ${gameId}`);
+    // If still not found, check all active games
+    const allGames = Object.entries(gameStates)
+      .filter(([_, g]) => g.active)
+      .sort((a, b) => b[1].created - a[1].created);
+    
+    if (allGames.length > 0) {
+      return { gameId: allGames[0][0], game: allGames[0][1] };
     }
+  } else {
+    return { gameId, game };
   }
+  
+  return { gameId: null, game: null };
+}
+
+function joinGame(ws, gameId, player) {
+  console.log(`Player ${player} trying to join game ${gameId}`);
+  
+  const { gameId: foundGameId, game } = findGame(gameId);
   
   if (!game) {
     ws.send(JSON.stringify({ type: 'ERROR', message: 'Game not found' }));
     return;
   }
   
+  // Update gameId to the found one
+  gameId = foundGameId;
+  
   if (game.players.includes(player)) {
+    const opponent = game.players.find(p => p !== player);
+    
     ws.send(JSON.stringify({ 
       type: 'RECONNECTED', 
       gameId,
-      opponent: game.players.find(p => p !== player),
+      opponent,
       gamePhase: game.readyPlayers.length === 2 ? 'battle' : 'placement'
     }));
-    console.log(`Player ${player} reconnected to game ${gameId}`);
+    console.log(`Player ${player} reconnected to game ${gameId} against ${opponent}`);
     return;
   }
 
@@ -170,33 +177,10 @@ function joinGame(ws, gameId, player) {
 }
 
 function leaveGame(gameId, player) {
-  // Try direct match first
-  let game = gameStates[gameId];
-  
-  // If not found, try finding it by shortId or player pattern
-  if (!game) {
-    // Try by shortId
-    game = Object.values(gameStates).find(g => g.shortId === gameId);
-    
-    // If still not found, try to match by player names
-    if (!game) {
-      const players = gameId.split('-');
-      if (players.length >= 2) {
-        game = Object.values(gameStates).find(g => 
-          g.players.includes(players[0]) && 
-          g.players.includes(players[1]) &&
-          g.active
-        );
-      }
-    }
-    
-    // If found, get the actual gameId
-    if (game) {
-      gameId = Object.keys(gameStates).find(key => gameStates[key] === game);
-    }
-  }
+  const { gameId: foundGameId, game } = findGame(gameId);
   
   if (!game) return;
+  gameId = foundGameId;
 
   const opponent = game.players.find(p => p !== player);
   const opponentSocket = playerService.getSocket(opponent);
@@ -210,33 +194,11 @@ function leaveGame(gameId, player) {
   }
 }
 
-// All other functions remain the same
 function placeShips(gameId, player, ships) {
-  // Try to find the game with flexible matching
-  let game = gameStates[gameId];
-  
-  if (!game) {
-    // Try by shortId
-    game = Object.values(gameStates).find(g => g.shortId === gameId);
-    
-    // Try by player pattern
-    if (!game) {
-      const players = gameId.split('-');
-      if (players.length >= 2) {
-        game = Object.values(gameStates).find(g => 
-          g.players.includes(players[0]) && 
-          g.players.includes(players[1]) &&
-          g.active
-        );
-      }
-    }
-    
-    if (game) {
-      gameId = Object.keys(gameStates).find(key => gameStates[key] === game);
-    }
-  }
+  const { gameId: foundGameId, game } = findGame(gameId);
   
   if (!game) return;
+  gameId = foundGameId;
 
   game.ships[player] = ships;
   
@@ -269,29 +231,7 @@ function placeShips(gameId, player, ships) {
 }
 
 function attack({ gameId, attacker, defender, position }) {
-  // Try to find the game with flexible matching
-  let game = gameStates[gameId];
-  
-  if (!game) {
-    // Try by shortId
-    game = Object.values(gameStates).find(g => g.shortId === gameId);
-    
-    // Try by player pattern
-    if (!game) {
-      const players = gameId.split('-');
-      if (players.length >= 2) {
-        game = Object.values(gameStates).find(g => 
-          g.players.includes(players[0]) && 
-          g.players.includes(players[1]) &&
-          g.active
-        );
-      }
-    }
-    
-    if (game) {
-      gameId = Object.keys(gameStates).find(key => gameStates[key] === game);
-    }
-  }
+  const { gameId: foundGameId, game } = findGame(gameId);
   
   if (!game || !game.active) {
     playerService.getSocket(attacker)?.send(JSON.stringify({
@@ -300,6 +240,8 @@ function attack({ gameId, attacker, defender, position }) {
     }));
     return;
   }
+  
+  gameId = foundGameId;
   
   if (game.turn !== attacker) {
     playerService.getSocket(attacker)?.send(JSON.stringify({
@@ -330,31 +272,10 @@ function attack({ gameId, attacker, defender, position }) {
 }
 
 function attackResult({ gameId, attacker, defender, position, hit, shipDestroyed }) {
-  // Try to find the game with flexible matching
-  let game = gameStates[gameId];
-  
-  if (!game) {
-    // Try by shortId
-    game = Object.values(gameStates).find(g => g.shortId === gameId);
-    
-    // Try by player pattern
-    if (!game) {
-      const players = gameId.split('-');
-      if (players.length >= 2) {
-        game = Object.values(gameStates).find(g => 
-          g.players.includes(players[0]) && 
-          g.players.includes(players[1]) &&
-          g.active
-        );
-      }
-    }
-    
-    if (game) {
-      gameId = Object.keys(gameStates).find(key => gameStates[key] === game);
-    }
-  }
+  const { gameId: foundGameId, game } = findGame(gameId);
   
   if (!game || !game.active) return;
+  gameId = foundGameId;
 
   if (!game.boards[defender]) game.boards[defender] = createGameBoard();
   game.boards[defender][position.row][position.col] = hit ? 'hit' : 'miss';
@@ -384,25 +305,7 @@ function attackResult({ gameId, attacker, defender, position, hit, shipDestroyed
 }
 
 function chat({ gameId, from, message }) {
-  // Try to find the game with flexible matching
-  let game = gameStates[gameId];
-  
-  if (!game) {
-    // Try by shortId
-    game = Object.values(gameStates).find(g => g.shortId === gameId);
-    
-    // Try by player pattern
-    if (!game) {
-      const players = gameId.split('-');
-      if (players.length >= 2) {
-        game = Object.values(gameStates).find(g => 
-          g.players.includes(players[0]) && 
-          g.players.includes(players[1]) &&
-          g.active
-        );
-      }
-    }
-  }
+  const { gameId: foundGameId, game } = findGame(gameId);
   
   if (!game || !game.active) return;
   
@@ -411,8 +314,10 @@ function chat({ gameId, from, message }) {
 }
 
 function endGame(gameId, winner) {
-  const game = gameStates[gameId];
+  const { gameId: foundGameId, game } = findGame(gameId);
+  
   if (!game || !game.active) return;
+  gameId = foundGameId;
 
   game.active = false;
   game.winner = winner;
