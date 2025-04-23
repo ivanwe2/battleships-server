@@ -4,6 +4,18 @@ const { createGameBoard } = require('../utils/boardUtils');
 let gameStates = {};
 
 function createGame(ws, player) {
+  const existingGame = Object.entries(gameStates).find(([_, game]) => 
+    game.players.includes(player) && game.active
+  );
+  
+  if (existingGame) {
+    ws.send(JSON.stringify({
+      type: 'ERROR',
+      message: 'You are already in a game'
+    }));
+    return;
+  }
+
   const gameId = `${player}-${Date.now()}`;
   
   gameStates[gameId] = {
@@ -16,7 +28,9 @@ function createGame(ws, player) {
       [player]: []
     },
     turn: null,
-    waitingForOpponent: true
+    waitingForOpponent: true,
+    active: true,
+    created: Date.now()
   };
 
   ws.send(JSON.stringify({
@@ -51,7 +65,9 @@ function acceptInvite(from, to) {
       [from]: [],
       [to]: []
     },
-    turn: null
+    turn: null,
+    active: true,
+    created: Date.now()
   };
 
   [fromSocket, toSocket].forEach((socket, i) => {
@@ -66,31 +82,45 @@ function acceptInvite(from, to) {
 }
 
 function joinGame(ws, gameId, player) {
+  console.log(`Player ${player} trying to join game ${gameId}`);
+  
   if (!gameStates[gameId]) {
     ws.send(JSON.stringify({ type: 'ERROR', message: 'Game not found' }));
     return;
   }
 
-  if (gameStates[gameId].waitingForOpponent && gameStates[gameId].players.length === 1) {
-    const hostPlayer = gameStates[gameId].players[0];
+  const game = gameStates[gameId];
+  
+  if (game.players.includes(player)) {
+    ws.send(JSON.stringify({ 
+      type: 'RECONNECTED', 
+      gameId,
+      opponent: game.players.find(p => p !== player),
+      gamePhase: game.readyPlayers.length === 2 ? 'battle' : 'placement'
+    }));
+    console.log(`Player ${player} reconnected to game ${gameId}`);
+    return;
+  }
+
+  if (game.waitingForOpponent && game.players.length === 1) {
+    const hostPlayer = game.players[0];
     
     if (hostPlayer === player) {
       ws.send(JSON.stringify({ type: 'ERROR', message: 'Cannot join your own game' }));
       return;
     }
     
-    gameStates[gameId].players.push(player);
-    gameStates[gameId].boards[player] = createGameBoard();
-    gameStates[gameId].ships[player] = [];
-    gameStates[gameId].waitingForOpponent = false;
+    game.players.push(player);
+    game.boards[player] = createGameBoard();
+    game.ships[player] = [];
+    game.waitingForOpponent = false;
     
     const hostSocket = playerService.getSocket(hostPlayer);
     
     if (hostSocket) {
       hostSocket.send(JSON.stringify({
-        type: 'START_GAME',
-        opponent: player,
-        gameId
+        type: 'GAME_JOINED',
+        player
       }));
     }
     
@@ -104,10 +134,7 @@ function joinGame(ws, gameId, player) {
     return;
   }
 
-  playerService.getSocket(player)?.send(JSON.stringify({
-    type: 'GAME_JOINED',
-    player
-  }));
+  ws.send(JSON.stringify({ type: 'ERROR', message: 'Game is full' }));
 }
 
 function leaveGame(gameId, player) {
@@ -118,37 +145,58 @@ function leaveGame(gameId, player) {
   if (opponentSocket) {
     opponentSocket.send(JSON.stringify({ type: 'GAME_LEFT', player }));
   }
+  
+  if (gameStates[gameId].readyPlayers.length < 2) {
+    delete gameStates[gameId];
+    console.log(`Game ${gameId} deleted because ${player} left during placement phase`);
+  }
 }
 
 function placeShips(gameId, player, ships) {
   if (!gameStates[gameId]) return;
 
-  gameStates[gameId].ships[player] = ships;
-  if (!gameStates[gameId].readyPlayers.includes(player)) {
-    gameStates[gameId].readyPlayers.push(player);
+  const game = gameStates[gameId];
+  game.ships[player] = ships;
+  
+  if (!game.readyPlayers.includes(player)) {
+    game.readyPlayers.push(player);
   }
 
-  const opponent = gameStates[gameId].players.find(p => p !== player);
+  const opponent = game.players.find(p => p !== player);
   playerService.getSocket(opponent)?.send(JSON.stringify({
     type: 'SHIPS_PLACED',
     player
   }));
 
-  if (gameStates[gameId].readyPlayers.length === 2) {
-    const first = Math.random() < 0.5 ? gameStates[gameId].players[0] : gameStates[gameId].players[1];
-    gameStates[gameId].turn = first;
-    gameStates[gameId].players.forEach(p => {
-      playerService.getSocket(p)?.send(JSON.stringify({
-        type: 'GAME_READY',
-        firstPlayer: first
-      }));
+  if (game.readyPlayers.length === 2) {
+    const first = Math.random() < 0.5 ? game.players[0] : game.players[1];
+    game.turn = first;
+    
+    game.players.forEach(p => {
+      const playerSocket = playerService.getSocket(p);
+      if (playerSocket) {
+        playerSocket.send(JSON.stringify({
+          type: 'GAME_READY',
+          firstPlayer: first
+        }));
+      }
     });
+    
+    console.log(`Game ${gameId} is ready, ${first} goes first`);
   }
 }
 
 function attack({ gameId, attacker, defender, position }) {
   const game = gameStates[gameId];
-  if (!game || game.turn !== attacker) {
+  if (!game || !game.active) {
+    playerService.getSocket(attacker)?.send(JSON.stringify({
+      type: 'ERROR',
+      message: 'Game not found or inactive'
+    }));
+    return;
+  }
+  
+  if (game.turn !== attacker) {
     playerService.getSocket(attacker)?.send(JSON.stringify({
       type: 'ERROR',
       message: 'Not your turn'
@@ -156,31 +204,51 @@ function attack({ gameId, attacker, defender, position }) {
     return;
   }
 
-  playerService.getSocket(defender)?.send(JSON.stringify({
-    type: 'ATTACK',
-    attacker,
-    position
-  }));
+  const defenderSocket = playerService.getSocket(defender);
+  if (defenderSocket) {
+    defenderSocket.send(JSON.stringify({
+      type: 'ATTACK',
+      attacker,
+      position
+    }));
+  } else {
+    playerService.getSocket(attacker)?.send(JSON.stringify({
+      type: 'ATTACK_RESULT',
+      attacker,
+      defender,
+      position,
+      hit: false,
+      shipDestroyed: null
+    }));
+    game.turn = defender;
+  }
 }
 
 function attackResult({ gameId, attacker, defender, position, hit, shipDestroyed }) {
   const game = gameStates[gameId];
-  if (!game) return;
+  if (!game || !game.active) return;
 
+  if (!game.boards[defender]) game.boards[defender] = createGameBoard();
   game.boards[defender][position.row][position.col] = hit ? 'hit' : 'miss';
+  
   if (!hit) game.turn = defender;
 
-  playerService.getSocket(attacker)?.send(JSON.stringify({
-    type: 'ATTACK_RESULT',
-    attacker,
-    defender,
-    position,
-    hit,
-    shipDestroyed
-  }));
+  const attackerSocket = playerService.getSocket(attacker);
+  if (attackerSocket) {
+    attackerSocket.send(JSON.stringify({
+      type: 'ATTACK_RESULT',
+      attacker,
+      defender,
+      position,
+      hit,
+      shipDestroyed
+    }));
+  }
 
   if (shipDestroyed) {
-    game.ships[defender] = game.ships[defender].filter(s => s.name !== shipDestroyed);
+    if (!game.ships[defender]) game.ships[defender] = [];
+    game.ships[defender] = game.ships[defender].filter(s => s.id !== shipDestroyed);
+    
     if (game.ships[defender].length === 0) {
       endGame(gameId, attacker);
     }
@@ -188,22 +256,48 @@ function attackResult({ gameId, attacker, defender, position, hit, shipDestroyed
 }
 
 function chat({ gameId, from, message }) {
-  const to = gameStates[gameId]?.players.find(p => p !== from);
+  const game = gameStates[gameId];
+  if (!game || !game.active) return;
+  
+  const to = game.players.find(p => p !== from);
   playerService.getSocket(to)?.send(JSON.stringify({ type: 'CHAT', from, message }));
 }
 
 function endGame(gameId, winner) {
-  if (!gameStates[gameId]) return;
+  const game = gameStates[gameId];
+  if (!game || !game.active) return;
 
-  gameStates[gameId].players.forEach(player => {
-    playerService.getSocket(player)?.send(JSON.stringify({
-      type: 'GAME_OVER',
-      winner
-    }));
+  game.active = false;
+  game.winner = winner;
+
+  game.players.forEach(player => {
+    const playerSocket = playerService.getSocket(player);
+    if (playerSocket) {
+      playerSocket.send(JSON.stringify({
+        type: 'GAME_OVER',
+        winner
+      }));
+    }
   });
 
-  delete gameStates[gameId];
+  setTimeout(() => {
+    delete gameStates[gameId];
+    console.log(`Game ${gameId} state cleared from memory`);
+  }, 3600000);
 }
+
+function cleanupOldGames() {
+  const now = Date.now();
+  const oldGames = Object.entries(gameStates)
+    .filter(([_, game]) => !game.active && now - game.created > 3600000);
+    
+  oldGames.forEach(([gameId, _]) => {
+    delete gameStates[gameId];
+    console.log(`Old game ${gameId} cleared from memory`);
+  });
+}
+
+setInterval(cleanupOldGames, 3600000);
 
 module.exports = {
   createGame,
