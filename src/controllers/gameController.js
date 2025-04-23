@@ -7,6 +7,7 @@ function handleMessage(ws, data, wss) {
     case 'LOGOUT': return playerService.logout(data.username, wss);
     case 'INVITE': return gameService.invite(data.from, data.to);
     case 'ACCEPT_INVITE': return gameService.acceptInvite(data.from, data.to);
+    case 'CREATE_GAME': return gameService.createGame(ws, data.player);
     case 'JOIN_GAME': return gameService.joinGame(ws, data.gameId, data.player);
     case 'LEAVE_GAME': return gameService.leaveGame(data.gameId, data.player);
     case 'SHIPS_PLACED': return gameService.placeShips(data.gameId, data.player, data.ships);
