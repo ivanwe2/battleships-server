@@ -53,7 +53,12 @@ function acceptInvite(from, to) {
   const toSocket = playerService.getSocket(to);
   if (!fromSocket || !toSocket) return;
 
+  // Use a more consistent game ID format
   const gameId = `${from}-${to}-${Date.now()}`;
+  
+  // Store both the full ID and a simplified version for easier matching
+  const gameShortId = `${from}-${to}`;
+  
   gameStates[gameId] = {
     players: [from, to],
     readyPlayers: [],
@@ -67,7 +72,8 @@ function acceptInvite(from, to) {
     },
     turn: null,
     active: true,
-    created: Date.now()
+    created: Date.now(),
+    shortId: gameShortId // Store the short ID for lookup
   };
 
   [fromSocket, toSocket].forEach((socket, i) => {
@@ -84,12 +90,38 @@ function acceptInvite(from, to) {
 function joinGame(ws, gameId, player) {
   console.log(`Player ${player} trying to join game ${gameId}`);
   
-  if (!gameStates[gameId]) {
+  // First try direct match with the gameId
+  let game = gameStates[gameId];
+  
+  // If not found, try to find a game by shortId or player names pattern
+  if (!game) {
+    // Try to find by shortId
+    game = Object.values(gameStates).find(g => g.shortId === gameId);
+    
+    // If still not found, try to match by player names in the ID
+    if (!game) {
+      // Extract player names if gameId is in format "player1-player2"
+      const players = gameId.split('-');
+      if (players.length >= 2) {
+        game = Object.values(gameStates).find(g => 
+          g.players.includes(players[0]) && 
+          g.players.includes(players[1]) &&
+          g.active
+        );
+      }
+    }
+    
+    // If we found a game through alternative methods, get its actual ID
+    if (game) {
+      gameId = Object.keys(gameStates).find(key => gameStates[key] === game);
+      console.log(`Found matching game with ID: ${gameId}`);
+    }
+  }
+  
+  if (!game) {
     ws.send(JSON.stringify({ type: 'ERROR', message: 'Game not found' }));
     return;
   }
-
-  const game = gameStates[gameId];
   
   if (game.players.includes(player)) {
     ws.send(JSON.stringify({ 
@@ -138,24 +170,74 @@ function joinGame(ws, gameId, player) {
 }
 
 function leaveGame(gameId, player) {
-  if (!gameStates[gameId]) return;
+  // Try direct match first
+  let game = gameStates[gameId];
+  
+  // If not found, try finding it by shortId or player pattern
+  if (!game) {
+    // Try by shortId
+    game = Object.values(gameStates).find(g => g.shortId === gameId);
+    
+    // If still not found, try to match by player names
+    if (!game) {
+      const players = gameId.split('-');
+      if (players.length >= 2) {
+        game = Object.values(gameStates).find(g => 
+          g.players.includes(players[0]) && 
+          g.players.includes(players[1]) &&
+          g.active
+        );
+      }
+    }
+    
+    // If found, get the actual gameId
+    if (game) {
+      gameId = Object.keys(gameStates).find(key => gameStates[key] === game);
+    }
+  }
+  
+  if (!game) return;
 
-  const opponent = gameStates[gameId].players.find(p => p !== player);
+  const opponent = game.players.find(p => p !== player);
   const opponentSocket = playerService.getSocket(opponent);
   if (opponentSocket) {
     opponentSocket.send(JSON.stringify({ type: 'GAME_LEFT', player }));
   }
   
-  if (gameStates[gameId].readyPlayers.length < 2) {
+  if (game.readyPlayers.length < 2) {
     delete gameStates[gameId];
     console.log(`Game ${gameId} deleted because ${player} left during placement phase`);
   }
 }
 
+// All other functions remain the same
 function placeShips(gameId, player, ships) {
-  if (!gameStates[gameId]) return;
+  // Try to find the game with flexible matching
+  let game = gameStates[gameId];
+  
+  if (!game) {
+    // Try by shortId
+    game = Object.values(gameStates).find(g => g.shortId === gameId);
+    
+    // Try by player pattern
+    if (!game) {
+      const players = gameId.split('-');
+      if (players.length >= 2) {
+        game = Object.values(gameStates).find(g => 
+          g.players.includes(players[0]) && 
+          g.players.includes(players[1]) &&
+          g.active
+        );
+      }
+    }
+    
+    if (game) {
+      gameId = Object.keys(gameStates).find(key => gameStates[key] === game);
+    }
+  }
+  
+  if (!game) return;
 
-  const game = gameStates[gameId];
   game.ships[player] = ships;
   
   if (!game.readyPlayers.includes(player)) {
@@ -187,7 +269,30 @@ function placeShips(gameId, player, ships) {
 }
 
 function attack({ gameId, attacker, defender, position }) {
-  const game = gameStates[gameId];
+  // Try to find the game with flexible matching
+  let game = gameStates[gameId];
+  
+  if (!game) {
+    // Try by shortId
+    game = Object.values(gameStates).find(g => g.shortId === gameId);
+    
+    // Try by player pattern
+    if (!game) {
+      const players = gameId.split('-');
+      if (players.length >= 2) {
+        game = Object.values(gameStates).find(g => 
+          g.players.includes(players[0]) && 
+          g.players.includes(players[1]) &&
+          g.active
+        );
+      }
+    }
+    
+    if (game) {
+      gameId = Object.keys(gameStates).find(key => gameStates[key] === game);
+    }
+  }
+  
   if (!game || !game.active) {
     playerService.getSocket(attacker)?.send(JSON.stringify({
       type: 'ERROR',
@@ -225,7 +330,30 @@ function attack({ gameId, attacker, defender, position }) {
 }
 
 function attackResult({ gameId, attacker, defender, position, hit, shipDestroyed }) {
-  const game = gameStates[gameId];
+  // Try to find the game with flexible matching
+  let game = gameStates[gameId];
+  
+  if (!game) {
+    // Try by shortId
+    game = Object.values(gameStates).find(g => g.shortId === gameId);
+    
+    // Try by player pattern
+    if (!game) {
+      const players = gameId.split('-');
+      if (players.length >= 2) {
+        game = Object.values(gameStates).find(g => 
+          g.players.includes(players[0]) && 
+          g.players.includes(players[1]) &&
+          g.active
+        );
+      }
+    }
+    
+    if (game) {
+      gameId = Object.keys(gameStates).find(key => gameStates[key] === game);
+    }
+  }
+  
   if (!game || !game.active) return;
 
   if (!game.boards[defender]) game.boards[defender] = createGameBoard();
@@ -256,7 +384,26 @@ function attackResult({ gameId, attacker, defender, position, hit, shipDestroyed
 }
 
 function chat({ gameId, from, message }) {
-  const game = gameStates[gameId];
+  // Try to find the game with flexible matching
+  let game = gameStates[gameId];
+  
+  if (!game) {
+    // Try by shortId
+    game = Object.values(gameStates).find(g => g.shortId === gameId);
+    
+    // Try by player pattern
+    if (!game) {
+      const players = gameId.split('-');
+      if (players.length >= 2) {
+        game = Object.values(gameStates).find(g => 
+          g.players.includes(players[0]) && 
+          g.players.includes(players[1]) &&
+          g.active
+        );
+      }
+    }
+  }
+  
   if (!game || !game.active) return;
   
   const to = game.players.find(p => p !== from);
