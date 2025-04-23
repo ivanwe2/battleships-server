@@ -1,22 +1,48 @@
 let players = [];
 let sockets = {};
+const gameService = require('./gameService');
 
 function register(ws, username, wss) {
+  // Handle reconnection case
   if (sockets[username] && sockets[username] !== ws) {
     console.log(`Player ${username} is reconnecting, replacing old socket`);
+    
+    // Replace socket
     sockets[username] = ws;
     ws.player = username;
     
+    // Check if player is in a game
+    const { gameId, game } = gameService.getActiveGame(username);
+    
+    // Success message
     ws.send(JSON.stringify({ 
       type: 'REGISTRATION_SUCCESS', 
       username,
       message: 'Reconnected successfully' 
     }));
     
+    // Set players list
     ws.send(JSON.stringify({ type: 'SET_PLAYERS', players }));
+    
+    // If in a game, send game state
+    if (game && gameId) {
+      const opponent = game.players.find(p => p !== username);
+      
+      // Tell client they're in a game
+      ws.send(JSON.stringify({ 
+        type: 'RECONNECTED', 
+        gameId,
+        opponent,
+        gamePhase: game.readyPlayers.length === 2 ? 'battle' : 'placement'
+      }));
+      
+      console.log(`Player ${username} reconnected to game ${gameId}`);
+    }
+    
     return;
   }
   
+  // New registration case
   if (!players.includes(username)) {
     players.push(username);
   }
@@ -33,6 +59,22 @@ function register(ws, username, wss) {
   ws.send(JSON.stringify({ type: 'SET_PLAYERS', players }));
   broadcastPlayers(wss);
   console.log(`Player ${username} registered`);
+  
+  // Check if player was in a game before registering
+  const { gameId, game } = gameService.getActiveGame(username);
+  if (game && gameId) {
+    const opponent = game.players.find(p => p !== username);
+    
+    // Tell client they're in a game
+    ws.send(JSON.stringify({ 
+      type: 'RECONNECTED', 
+      gameId,
+      opponent,
+      gamePhase: game.readyPlayers.length === 2 ? 'battle' : 'placement'
+    }));
+    
+    console.log(`Player ${username} reconnected to game ${gameId}`);
+  }
 }
 
 function logout(username, wss) {
@@ -48,10 +90,13 @@ function handleDisconnect(ws, wss) {
 
   console.log(`Player ${username} disconnected`);
   
+  // Keep the player in the list but mark socket as null
   sockets[username] = null;
   
+  // Don't remove the player immediately to allow for reconnection
   setTimeout(() => {
     if (!sockets[username]) {
+      // Only remove from players list after timeout
       players = players.filter(p => p !== username);
       delete sockets[username];
       broadcastPlayers(wss);

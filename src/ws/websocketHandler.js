@@ -7,7 +7,11 @@ function setupWebSocket(server) {
 
   const heartbeatInterval = setInterval(() => {
     wss.clients.forEach(ws => {
-      if (!ws.isAlive) return ws.terminate();
+      if (!ws.isAlive) {
+        console.log('Client failed heartbeat, terminating');
+        return ws.terminate();
+      }
+      
       ws.isAlive = false;
       ws.ping();
     });
@@ -31,9 +35,21 @@ function setupWebSocket(server) {
           ws.player = data.username;
         }
         
-        gameController.handleMessage(ws, data, wss);
-      } catch (error) {
-        console.error('Invalid JSON message:', error);
+        // Handle potential errors
+        try {
+          gameController.handleMessage(ws, data, wss);
+        } catch (controllerError) {
+          console.error('Error in game controller:', controllerError);
+          // Inform client of error
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'ERROR',
+              message: 'Server error processing request'
+            }));
+          }
+        }
+      } catch (parseError) {
+        console.error('Invalid JSON message:', parseError);
       }
     });
 
@@ -42,10 +58,30 @@ function setupWebSocket(server) {
       playerService.handleDisconnect(ws, wss);
     });
     
-    ws.on('error', error => console.error('WebSocket error:', error));
+    ws.on('error', error => {
+      console.error('WebSocket error:', error);
+      // Try to send an error message if possible
+      try {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'ERROR',
+            message: 'WebSocket connection error'
+          }));
+        }
+      } catch (e) {
+        console.error('Failed to send error message to client:', e);
+      }
+    });
   });
 
   wss.on('close', () => clearInterval(heartbeatInterval));
+  
+  // Handle server errors to prevent crashes
+  wss.on('error', (error) => {
+    console.error('WebSocket server error:', error);
+  });
+  
+  return wss;
 }
 
 module.exports = setupWebSocket;
