@@ -3,6 +3,30 @@ const { createGameBoard } = require('../utils/boardUtils');
 
 let gameStates = {};
 
+function createGame(ws, player) {
+  const gameId = `${player}-${Date.now()}`;
+  
+  gameStates[gameId] = {
+    players: [player],
+    readyPlayers: [],
+    boards: {
+      [player]: createGameBoard()
+    },
+    ships: {
+      [player]: []
+    },
+    turn: null,
+    waitingForOpponent: true
+  };
+
+  ws.send(JSON.stringify({
+    type: 'GAME_CREATED',
+    gameId
+  }));
+
+  console.log(`Game ${gameId} created by ${player}, waiting for opponent`);
+}
+
 function invite(from, to) {
   const toSocket = playerService.getSocket(to);
   if (toSocket) {
@@ -44,6 +68,39 @@ function acceptInvite(from, to) {
 function joinGame(ws, gameId, player) {
   if (!gameStates[gameId]) {
     ws.send(JSON.stringify({ type: 'ERROR', message: 'Game not found' }));
+    return;
+  }
+
+  if (gameStates[gameId].waitingForOpponent && gameStates[gameId].players.length === 1) {
+    const hostPlayer = gameStates[gameId].players[0];
+    
+    if (hostPlayer === player) {
+      ws.send(JSON.stringify({ type: 'ERROR', message: 'Cannot join your own game' }));
+      return;
+    }
+    
+    gameStates[gameId].players.push(player);
+    gameStates[gameId].boards[player] = createGameBoard();
+    gameStates[gameId].ships[player] = [];
+    gameStates[gameId].waitingForOpponent = false;
+    
+    const hostSocket = playerService.getSocket(hostPlayer);
+    
+    if (hostSocket) {
+      hostSocket.send(JSON.stringify({
+        type: 'START_GAME',
+        opponent: player,
+        gameId
+      }));
+    }
+    
+    ws.send(JSON.stringify({
+      type: 'START_GAME',
+      opponent: hostPlayer,
+      gameId
+    }));
+    
+    console.log(`Player ${player} joined game ${gameId}, starting game`);
     return;
   }
 
@@ -149,6 +206,7 @@ function endGame(gameId, winner) {
 }
 
 module.exports = {
+  createGame,
   invite,
   acceptInvite,
   joinGame,
