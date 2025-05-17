@@ -1,87 +1,96 @@
 const WebSocket = require('ws');
 const gameController = require('../controllers/gameController');
 const playerService = require('../services/playerService');
+const { TIME_INTERVALS, MESSAGE_TYPES } = require('../utils/constants');
+const { sendMessage } = require('../utils/messageUtils');
+const { sendError } = require('../utils/errorUtils');
 
 function setupWebSocket(server) {
   const wss = new WebSocket.Server({ server });
+  setupHeartbeat(wss);
+  setupConnectionHandlers(wss);
+  setupServerErrorHandling(wss);
+  return wss;
+}
 
+function setupHeartbeat(wss) {
   const heartbeatInterval = setInterval(() => {
     wss.clients.forEach(ws => {
       if (!ws.isAlive) {
-        console.log('Client failed heartbeat, terminating');
         return ws.terminate();
       }
       
       ws.isAlive = false;
       ws.ping();
     });
-  }, 30000);
-
-  wss.on('connection', ws => {
-    console.log('WebSocket client connected');
-    ws.isAlive = true;
-
-    ws.id = Date.now().toString();
-    ws.player = null;
-
-    ws.on('pong', () => ws.isAlive = true);
-
-    ws.on('message', message => {
-      try {
-        const data = JSON.parse(message);
-        console.log('Received message:', data);
-        
-        if (data.type === 'REGISTER') {
-          ws.player = data.username;
-        }
-        
-        // Handle potential errors
-        try {
-          gameController.handleMessage(ws, data, wss);
-        } catch (controllerError) {
-          console.error('Error in game controller:', controllerError);
-          // Inform client of error
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-              type: 'ERROR',
-              message: 'Server error processing request'
-            }));
-          }
-        }
-      } catch (parseError) {
-        console.error('Invalid JSON message:', parseError);
-      }
-    });
-
-    ws.on('close', () => {
-      console.log('WebSocket client disconnected');
-      playerService.handleDisconnect(ws, wss);
-    });
-    
-    ws.on('error', error => {
-      console.error('WebSocket error:', error);
-      // Try to send an error message if possible
-      try {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'ERROR',
-            message: 'WebSocket connection error'
-          }));
-        }
-      } catch (e) {
-        console.error('Failed to send error message to client:', e);
-      }
-    });
-  });
-
+  }, TIME_INTERVALS.HEARTBEAT);
+  
   wss.on('close', () => clearInterval(heartbeatInterval));
-  
-  // Handle server errors to prevent crashes
-  wss.on('error', (error) => {
-    console.error('WebSocket server error:', error);
+}
+
+function setupConnectionHandlers(wss) {
+  wss.on('connection', ws => {
+    initializeConnection(ws);
+    
+    ws.on('pong', () => ws.isAlive = true);
+    ws.on('message', message => handleClientMessage(ws, message, wss));
+    ws.on('close', () => handleClientDisconnect(ws, wss));
+    ws.on('error', error => handleClientError(ws, error));
   });
-  
-  return wss;
+}
+
+function initializeConnection(ws) {
+  ws.isAlive = true;
+  ws.id = Date.now().toString();
+  ws.player = null;
+}
+
+function handleClientMessage(ws, message, wss) {
+  try {
+    const data = parseMessage(message);
+    
+    if (data.type === MESSAGE_TYPES.REGISTER) {
+      ws.player = data.username;
+    }
+    
+    try {
+      gameController.handleMessage(ws, data, wss);
+    } catch (controllerError) {
+      handleControllerError(ws, controllerError);
+    }
+  } catch (parseError) {
+    console.error(e);
+  }
+}
+
+function parseMessage(message) {
+  return JSON.parse(message);
+}
+
+function handleControllerError(ws, error) {
+  if (ws.readyState === WebSocket.OPEN) {
+    sendError(ws, 'Server error processing request');
+  }
+}
+
+function handleClientDisconnect(ws, wss) {
+  playerService.handleDisconnect(ws, wss);
+}
+
+function handleClientError(ws, error) {
+  try {
+    if (ws.readyState === WebSocket.OPEN) {
+      sendError(ws, 'WebSocket connection error');
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function setupServerErrorHandling(wss) {
+  wss.on('error', () => {
+    console.error("Internal server error");
+  });
 }
 
 module.exports = setupWebSocket;

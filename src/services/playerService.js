@@ -1,130 +1,96 @@
-let players = [];
-let sockets = {};
-const gameService = require('./gameService');
+const { MESSAGE_TYPES, TIME_INTERVALS } = require('../utils/constants');
+const { sendMessage, broadcastMessage } = require('../utils/messageUtils');
+const { sendError } = require('../utils/errorUtils');
 
-function register(ws, username, wss) {
-  // Handle reconnection case
-  if (sockets[username] && sockets[username] !== ws) {
-    console.log(`Player ${username} is reconnecting, replacing old socket`);
+class PlayerService {
+  constructor() {
+    this.players = [];
+    this.sockets = {};
+  }
+
+  register(ws, username, wss) {
+    const isReconnecting = this.sockets[username] && this.sockets[username] !== ws;
     
-    // Replace socket
-    sockets[username] = ws;
+    if (isReconnecting) {
+      return this._handleReconnection(ws, username, wss);
+    }
+    
+    return this._handleNewRegistration(ws, username, wss);
+  }
+
+  _handleReconnection(ws, username, wss) {
+    this.sockets[username] = ws;
     ws.player = username;
     
-    // Check if player is in a game
-    const { gameId, game } = gameService.getActiveGame(username);
-    
-    // Success message
-    ws.send(JSON.stringify({ 
-      type: 'REGISTRATION_SUCCESS', 
+    sendMessage(ws, MESSAGE_TYPES.REGISTRATION_SUCCESS, { 
       username,
       message: 'Reconnected successfully' 
-    }));
+    });
     
-    // Set players list
-    ws.send(JSON.stringify({ type: 'SET_PLAYERS', players }));
+    sendMessage(ws, MESSAGE_TYPES.SET_PLAYERS, { players: this.players });
     
-    // If in a game, send game state
-    if (game && gameId) {
-      const opponent = game.players.find(p => p !== username);
-      
-      // Tell client they're in a game
-      ws.send(JSON.stringify({ 
-        type: 'RECONNECTED', 
-        gameId,
-        opponent,
-        gamePhase: game.readyPlayers.length === 2 ? 'battle' : 'placement'
-      }));
-      
-      console.log(`Player ${username} reconnected to game ${gameId}`);
+    return { username, reconnected: true };
+  }
+
+  _handleNewRegistration(ws, username, wss) {
+    if (!this.players.includes(username)) {
+      this.players.push(username);
     }
     
-    return;
-  }
-  
-  // New registration case
-  if (!players.includes(username)) {
-    players.push(username);
-  }
-  
-  sockets[username] = ws;
-  ws.player = username;
+    this.sockets[username] = ws;
+    ws.player = username;
 
-  ws.send(JSON.stringify({ 
-    type: 'REGISTRATION_SUCCESS', 
-    username,
-    message: 'Registered successfully' 
-  }));
-  
-  ws.send(JSON.stringify({ type: 'SET_PLAYERS', players }));
-  broadcastPlayers(wss);
-  console.log(`Player ${username} registered`);
-  
-  // Check if player was in a game before registering
-  const { gameId, game } = gameService.getActiveGame(username);
-  if (game && gameId) {
-    const opponent = game.players.find(p => p !== username);
+    sendMessage(ws, MESSAGE_TYPES.REGISTRATION_SUCCESS, { 
+      username,
+      message: 'Registered successfully' 
+    });
     
-    // Tell client they're in a game
-    ws.send(JSON.stringify({ 
-      type: 'RECONNECTED', 
-      gameId,
-      opponent,
-      gamePhase: game.readyPlayers.length === 2 ? 'battle' : 'placement'
-    }));
+    sendMessage(ws, MESSAGE_TYPES.SET_PLAYERS, { players: this.players });
+    this.broadcastPlayers(wss);
     
-    console.log(`Player ${username} reconnected to game ${gameId}`);
+    return { username, reconnected: false };
   }
-}
 
-function logout(username, wss) {
-  players = players.filter(p => p !== username);
-  delete sockets[username];
-  broadcastPlayers(wss);
-  console.log(`Player ${username} logged out`);
-}
+  logout(username, wss) {
+    this.players = this.players.filter(p => p !== username);
+    delete this.sockets[username];
+    this.broadcastPlayers(wss);
+  }
 
-function handleDisconnect(ws, wss) {
-  const username = ws.player || Object.keys(sockets).find(k => sockets[k] === ws);
-  if (!username) return;
+  handleDisconnect(ws, wss) {
+    const username = this._getUsernameFromSocket(ws);
+    if (!username) return;
+    
+    this.sockets[username] = null;
+    
+    setTimeout(() => {
+      this._cleanupPlayerAfterTimeout(username, wss);
+    }, TIME_INTERVALS.PLAYER_DISCONNECT);
+  }
 
-  console.log(`Player ${username} disconnected`);
-  
-  // Keep the player in the list but mark socket as null
-  sockets[username] = null;
-  
-  // Don't remove the player immediately to allow for reconnection
-  setTimeout(() => {
-    if (!sockets[username]) {
-      // Only remove from players list after timeout
-      players = players.filter(p => p !== username);
-      delete sockets[username];
-      broadcastPlayers(wss);
-      console.log(`Player ${username} removed after timeout`);
+  _cleanupPlayerAfterTimeout(username, wss) {
+    if (!this.sockets[username]) {
+      this.players = this.players.filter(p => p !== username);
+      delete this.sockets[username];
+      this.broadcastPlayers(wss);
     }
-  }, 60000);
+  }
+
+  _getUsernameFromSocket(ws) {
+    return ws.player || Object.keys(this.sockets).find(k => this.sockets[k] === ws);
+  }
+
+  broadcastPlayers(wss) {
+    broadcastMessage(wss.clients, MESSAGE_TYPES.SET_PLAYERS, { players: this.players });
+  }
+
+  getSocket(username) {
+    return this.sockets[username];
+  }
+
+  isPlayerOnline(username) {
+    return !!this.sockets[username];
+  }
 }
 
-function broadcastPlayers(wss) {
-  const data = JSON.stringify({ type: 'SET_PLAYERS', players });
-  wss.clients.forEach(client => {
-    if (client.readyState === 1) client.send(data);
-  });
-}
-
-function getSocket(username) {
-  return sockets[username];
-}
-
-function isPlayerOnline(username) {
-  return !!sockets[username];
-}
-
-module.exports = {
-  register,
-  logout,
-  handleDisconnect,
-  getSocket,
-  broadcastPlayers,
-  isPlayerOnline
-};
+module.exports = new PlayerService();

@@ -1,22 +1,62 @@
 const playerService = require('../services/playerService');
 const gameService = require('../services/gameService');
+const { MESSAGE_TYPES } = require('../utils/constants');
 
-function handleMessage(ws, data, wss) {
-  switch (data.type) {
-    case 'REGISTER': return playerService.register(ws, data.username, wss);
-    case 'LOGOUT': return playerService.logout(data.username, wss);
-    case 'INVITE': return gameService.invite(data.from, data.to);
-    case 'ACCEPT_INVITE': return gameService.acceptInvite(data.from, data.to);
-    case 'CREATE_GAME': return gameService.createGame(ws, data.player);
-    case 'JOIN_GAME': return gameService.joinGame(ws, data.gameId, data.player);
-    case 'LEAVE_GAME': return gameService.leaveGame(data.gameId, data.player);
-    case 'SHIPS_PLACED': return gameService.placeShips(data.gameId, data.player, data.ships);
-    case 'ATTACK': return gameService.attack(data);
-    case 'ATTACK_RESULT': return gameService.attackResult(data);
-    case 'CHAT': return gameService.chat(data);
-    case 'GAME_OVER': return gameService.endGame(data.gameId, data.winner);
-    default: console.warn('Unknown message type:', data.type);
+class GameController {
+  handleMessage(ws, data, wss) {
+    const handlers = this._getMessageHandlers();
+    const handler = handlers[data.type];
+    
+    if (handler) {
+      return handler(ws, data, wss);
+    }
+    
+    return this._handleUnknownMessageType(data.type);
+  }
+  
+  _getMessageHandlers() {
+    return {
+      [MESSAGE_TYPES.REGISTER]: (ws, data, wss) => 
+        playerService.register(ws, data.username, wss),
+        
+      [MESSAGE_TYPES.LOGOUT]: (ws, data, wss) => 
+        playerService.logout(data.username, wss),
+        
+      [MESSAGE_TYPES.INVITE]: (ws, data) => 
+        gameService.invite(data.from, data.to),
+        
+      [MESSAGE_TYPES.ACCEPT_INVITE]: (ws, data) => 
+        gameService.acceptInvite(data.from, data.to),
+        
+      [MESSAGE_TYPES.CREATE_GAME]: (ws, data) => 
+        gameService.createGame(ws, data.player),
+        
+      [MESSAGE_TYPES.JOIN_GAME]: (ws, data) => 
+        gameService.joinGame(ws, data.gameId, data.player),
+        
+      [MESSAGE_TYPES.LEAVE_GAME]: (ws, data) => 
+        gameService.leaveGame(data.gameId, data.player),
+        
+      [MESSAGE_TYPES.SHIPS_PLACED]: (ws, data) => 
+        gameService.placeShips(data.gameId, data.player, data.ships),
+        
+      [MESSAGE_TYPES.ATTACK]: (ws, data) => 
+        gameService.attack(data),
+        
+      [MESSAGE_TYPES.ATTACK_RESULT]: (ws, data) => 
+        gameService.attackResult(data),
+        
+      [MESSAGE_TYPES.CHAT]: (ws, data) => 
+        gameService.chat(data),
+        
+      [MESSAGE_TYPES.GAME_OVER]: (ws, data) => 
+        gameService.endGame(data.gameId, data.winner)
+    };
+  }
+  
+  _handleUnknownMessageType(type) {
+    // swallow
   }
 }
 
-module.exports = { handleMessage };
+module.exports = new GameController();
